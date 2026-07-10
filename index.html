@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0d1210">
+<title>Turf Speed Gun v2</title>
+<style>
+  :root{
+    --bg:#0d1210; --surface:#161d1a; --surface2:#1e2722;
+    --line:#2a352f; --text:#f2f5f0; --muted:#8a968e;
+    --accent:#c8f53c; --accent-dim:#5a6e1f; --danger:#ff5c4d;
+    --mono:"SF Mono","Roboto Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent;}
+  html,body{height:100%; background:var(--bg); color:var(--text);
+    font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    overscroll-behavior:none;}
+  .wrap{max-width:520px; margin:0 auto; padding:14px; display:flex; flex-direction:column; gap:12px; min-height:100%;}
+
+  header{display:flex; align-items:baseline; justify-content:space-between;}
+  header h1{font-size:15px; font-weight:600; letter-spacing:0.14em; text-transform:uppercase;}
+  header h1 span{color:var(--accent);}
+  header small{color:var(--muted); font-size:12px; font-family:var(--mono);}
+
+  .readout{background:var(--surface); border:1px solid var(--line); border-radius:14px;
+    padding:14px 16px 12px; text-align:center;}
+  .readout .speed{font-family:var(--mono); font-size:58px; font-weight:700; line-height:1.1;
+    color:var(--accent); font-variant-numeric:tabular-nums;}
+  .readout .sub{font-size:14px; color:var(--muted); min-height:21px;}
+  .readout.flash{animation:flash .5s ease;}
+  @keyframes flash{0%{background:var(--accent-dim);}100%{background:var(--surface);}}
+  .stats{display:flex; justify-content:space-around; border-top:1px solid var(--line);
+    margin-top:10px; padding-top:8px;}
+  .stats div{text-align:center;}
+  .stats .n{font-family:var(--mono); font-size:18px; font-weight:700;}
+  .stats .l{font-size:10px; letter-spacing:0.12em; text-transform:uppercase; color:var(--muted);}
+
+  .stage{position:relative; border-radius:14px; overflow:hidden; background:#000;
+    border:1px solid var(--line); aspect-ratio:16/9;}
+  video{width:100%; height:100%; object-fit:cover; display:block;}
+  canvas.overlay{position:absolute; inset:0; width:100%; height:100%; touch-action:none;}
+  .stage .hint{position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:var(--muted); font-size:14px; text-align:center; padding:20px;}
+
+  .meters{display:grid; grid-template-columns:14px 1fr; gap:6px 10px; align-items:center;
+    background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:10px 14px;}
+  .meters span{font-family:var(--mono); font-size:12px; color:var(--muted);}
+  .meterTrack{height:10px; background:var(--surface2); border-radius:5px; overflow:hidden; position:relative;}
+  .meterFill{height:100%; width:0%; background:var(--muted); border-radius:5px; transition:width .06s linear;}
+  .meterFill.hot{background:var(--accent);}
+  .meterTh{position:absolute; top:0; bottom:0; width:2px; background:var(--accent-dim); left:50%;}
+
+  .row{display:flex; gap:10px; align-items:center;}
+  .row label{font-size:13px; color:var(--muted); white-space:nowrap;}
+  input[type=number]{background:var(--surface2); border:1px solid var(--line); color:var(--text);
+    border-radius:10px; padding:10px 12px; font-size:16px; width:88px; font-family:var(--mono);}
+  input[type=range]{flex:1; accent-color:var(--accent);}
+
+  button{border:none; border-radius:12px; padding:15px 16px; font-size:16px; font-weight:600;
+    cursor:pointer; background:var(--surface2); color:var(--text); border:1px solid var(--line);}
+  button:active{transform:scale(.98);}
+  button.primary{background:var(--accent); color:#101500; border-color:var(--accent);}
+  button.stop{background:transparent; color:var(--danger); border-color:var(--danger);}
+  .btnrow{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+
+  .status{font-size:13px; color:var(--muted); text-align:center; min-height:20px;}
+  .status.live{color:var(--accent);}
+
+  .history{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:4px 16px;}
+  .history .item{display:flex; justify-content:space-between; padding:9px 0;
+    border-bottom:1px solid var(--line); font-size:14px;}
+  .history .item:last-child{border-bottom:none;}
+  .history .item b{font-family:var(--mono); color:var(--accent); font-weight:700;}
+  .history .empty{padding:14px 0; color:var(--muted); font-size:13px; text-align:center;}
+
+  details{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:12px 16px;}
+  summary{font-size:14px; font-weight:600; cursor:pointer;}
+  details p{font-size:13px; color:var(--muted); margin-top:8px;}
+  details p b{color:var(--text); font-weight:600;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Turf <span>speed gun</span> <small style="color:var(--muted)">v2</small></h1>
+    <small id="fpsBadge">—</small>
+  </header>
+
+  <div class="readout" id="readout">
+    <div class="speed" id="speedVal">—</div>
+    <div class="sub" id="speedSub">Point side-on at the pitch, then arm</div>
+    <div class="stats">
+      <div><div class="n" id="stBalls">0</div><div class="l">Balls</div></div>
+      <div><div class="n" id="stFast">—</div><div class="l">Fastest</div></div>
+      <div><div class="n" id="stAvg">—</div><div class="l">Average</div></div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <video id="cam" playsinline muted></video>
+    <canvas class="overlay" id="overlay"></canvas>
+    <div class="hint" id="camHint">Tap "Start camera" below.<br>Whole pitch in frame, phone steady.</div>
+  </div>
+
+  <div class="meters">
+    <span>A</span>
+    <div class="meterTrack"><div class="meterFill" id="meterA"></div><div class="meterTh"></div></div>
+    <span>B</span>
+    <div class="meterTrack"><div class="meterFill" id="meterB"></div><div class="meterTh"></div></div>
+  </div>
+
+  <div class="row">
+    <label for="dist">Gate distance</label>
+    <input type="number" id="dist" value="17" min="4" max="30" step="0.5">
+    <label>meters</label>
+  </div>
+  <div class="row">
+    <label for="sens">Sensitivity</label>
+    <input type="range" id="sens" min="1" max="10" value="6" step="1">
+    <span id="sensVal" style="font-family:var(--mono); font-size:14px; width:20px; text-align:right;">6</span>
+  </div>
+
+  <div class="btnrow">
+    <button id="startBtn" class="primary">Start camera</button>
+    <button id="armBtn" disabled>Arm gun</button>
+  </div>
+  <div class="status" id="status">Drag the lime lines onto the two creases after starting.</div>
+
+  <div class="history">
+    <div class="empty" id="histEmpty">No deliveries recorded yet</div>
+    <div id="histList"></div>
+  </div>
+
+  <details>
+    <summary>Setup & tuning guide</summary>
+    <p><b>Meters.</b> The A and B bars show live motion at each gate. Wave a hand across a gate — its bar should spike past the middle marker and glow lime. If a real ball doesn't make it glow, raise sensitivity. If it glows from people or wind in the nets, lower sensitivity or move the gates to cleaner background.</p>
+    <p><b>Rapid deliveries.</b> The gun re-arms itself about a second after each reading. If a ball trips only one gate, it self-clears in 2.5 s — no need to touch anything between balls.</p>
+    <p><b>Light matters.</b> A low-cost camera in dim light = motion blur and missed balls. Bright daylight or strong floodlights, a white or orange ball, and a plain background behind the pitch line improve detection more than any setting.</p>
+    <p><b>Framing.</b> Keep both gates in the middle 80% of the frame and the pitch roughly horizontal. Closer camera = bigger ball = easier detection, as long as both creases stay in view.</p>
+  </details>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const cam = $('cam'), overlay = $('overlay'), octx = overlay.getContext('2d');
+
+  // Each gate is sampled as its own thin high-res strip: SW columns x SH rows,
+  // split into ZONES chunks; the hottest zone is the gate's signal.
+  const SW = 12, SH = 128, ZONES = 16, ZR = SH / ZONES;
+  const strip = document.createElement('canvas');
+  strip.width = SW * 2; strip.height = SH;
+  const sctx = strip.getContext('2d', {willReadFrequently:true});
+
+  let stream = null, running = false, armed = false;
+  let gateA = 0.22, gateB = 0.78;
+  let bandTop = 0.28, bandBot = 0.75;
+  let prevGray = [null, null];
+  let base = [2, 2], noise = [1, 1];
+  let prevHit = [false, false];
+  let firstHit = null;
+  let lockUntil = 0, settleUntil = 0;
+  let frames = 0, fpsT = performance.now();
+  let dragging = -1;
+  let speeds = [];
+
+  const gateX = i => (i === 0 ? gateA : gateB);
+
+  function resizeOverlay(){
+    overlay.width = overlay.clientWidth * devicePixelRatio;
+    overlay.height = overlay.clientHeight * devicePixelRatio;
+    drawOverlay();
+  }
+  addEventListener('resize', resizeOverlay);
+
+  function drawOverlay(){
+    const w = overlay.width, h = overlay.height;
+    octx.clearRect(0,0,w,h);
+    if(!stream) return;
+    octx.setLineDash([8,8]);
+    octx.strokeStyle = 'rgba(200,245,60,0.4)';
+    octx.lineWidth = 2;
+    octx.beginPath();
+    octx.moveTo(0, bandTop*h); octx.lineTo(w, bandTop*h);
+    octx.moveTo(0, bandBot*h); octx.lineTo(w, bandBot*h);
+    octx.stroke();
+    octx.setLineDash([]);
+    for(let i=0;i<2;i++){
+      const x = gateX(i)*w;
+      octx.strokeStyle = '#c8f53c';
+      octx.lineWidth = 3;
+      octx.beginPath(); octx.moveTo(x, 0); octx.lineTo(x, h); octx.stroke();
+      octx.fillStyle = '#c8f53c';
+      octx.font = `${12*devicePixelRatio}px -apple-system,sans-serif`;
+      octx.fillText(i===0?'A':'B', x+6, 18*devicePixelRatio);
+    }
+  }
+
+  function pointerX(e){
+    const r = overlay.getBoundingClientRect();
+    return ((e.touches ? e.touches[0].clientX : e.clientX) - r.left) / r.width;
+  }
+  function down(e){
+    if(!stream) return;
+    const x = pointerX(e);
+    dragging = Math.abs(x-gateA) < Math.abs(x-gateB) ? 0 : 1;
+    move(e);
+  }
+  function move(e){
+    if(dragging < 0) return;
+    e.preventDefault();
+    let x = Math.min(0.97, Math.max(0.03, pointerX(e)));
+    if(dragging === 0) gateA = Math.min(x, gateB-0.08); else gateB = Math.max(x, gateA+0.08);
+    prevGray = [null, null]; base = [2,2]; noise = [1,1];   // gates moved: re-learn background
+    drawOverlay();
+  }
+  function up(){ dragging = -1; }
+  overlay.addEventListener('pointerdown', down);
+  overlay.addEventListener('pointermove', move);
+  addEventListener('pointerup', up);
+  overlay.addEventListener('touchstart', down, {passive:false});
+  overlay.addEventListener('touchmove', move, {passive:false});
+  addEventListener('touchend', up);
+
+  async function startCamera(){
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({
+        video:{ facingMode:'environment', width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:60, min:24} },
+        audio:false
+      });
+      cam.srcObject = stream;
+      await cam.play();
+      $('camHint').style.display = 'none';
+      $('startBtn').textContent = 'Camera on';
+      $('startBtn').classList.remove('primary');
+      $('armBtn').disabled = false;
+      $('armBtn').classList.add('primary');
+      $('status').textContent = 'Drag A and B onto the creases, then arm.';
+      resizeOverlay();
+      running = true;
+      loop();
+    }catch(err){
+      $('status').textContent = 'Camera blocked — allow camera access for this site in Chrome settings.';
+    }
+  }
+
+  // Sample both gate strips at native video resolution into the small canvas.
+  function sampleStrips(){
+    const vw = cam.videoWidth, vh = cam.videoHeight;
+    if(!vw) return null;
+    const sy = bandTop*vh, sh = (bandBot-bandTop)*vh;
+    const srcW = Math.max(8, vw * 0.015);           // strip ~1.5% of frame width
+    for(let i=0;i<2;i++){
+      const sx = Math.max(0, gateX(i)*vw - srcW/2);
+      sctx.drawImage(cam, sx, sy, srcW, sh, i*SW, 0, SW, SH);
+    }
+    return sctx.getImageData(0, 0, SW*2, SH).data;
+  }
+
+  function gateSignal(data, i, grayOut){
+    // grayscale this gate's strip and return hottest-zone mean abs diff vs previous frame
+    const xOff = i*SW, W = SW*2;
+    let maxZone = 0;
+    const havePrev = !!prevGray[i];
+    for(let z=0; z<ZONES; z++){
+      let sum = 0, n = 0;
+      for(let y=z*ZR; y<(z+1)*ZR; y++){
+        for(let x=0; x<SW; x++){
+          const p = (y*W + xOff + x) * 4;
+          const g = (data[p]*3 + data[p+1]*6 + data[p+2]) / 10;
+          const idx = y*SW + x;
+          if(havePrev) { sum += Math.abs(g - prevGray[i][idx]); n++; }
+          grayOut[idx] = g;
+        }
+      }
+      if(n){ const zAvg = sum/n; if(zAvg > maxZone) maxZone = zAvg; }
+    }
+    return havePrev ? maxZone : 0;
+  }
+
+  const grayBufs = [new Float32Array(SW*SH), new Float32Array(SW*SH)];
+
+  function processFrame(now){
+    const data = sampleStrips();
+    if(!data) return;
+
+    const sens = +$('sens').value;                 // 1 strict … 10 touchy
+    const k = 5.5 - sens*0.42;                     // multiplier over noise floor
+
+    for(let i=0;i<2;i++){
+      const sig = gateSignal(data, i, grayBufs[i]);
+      const tmp = prevGray[i] || new Float32Array(SW*SH);
+      prevGray[i] = grayBufs[i].slice ? Float32Array.from(grayBufs[i]) : grayBufs[i];
+
+      const thresh = base[i] + Math.max(3.5, noise[i]*k);
+      const hit = sig > thresh && now > settleUntil;
+
+      // meters
+      const pct = Math.min(100, sig/(thresh*2)*100);
+      const m = $(i===0?'meterA':'meterB');
+      m.style.width = pct + '%';
+      m.classList.toggle('hot', hit);
+
+      // learn background only when quiet, so a slow walker doesn't poison the baseline instantly
+      if(!hit){ base[i] = base[i]*0.93 + sig*0.07; noise[i] = noise[i]*0.93 + Math.abs(sig-base[i])*0.07; }
+
+      const rising = hit && !prevHit[i];
+      prevHit[i] = hit;
+
+      if(armed && rising && now > lockUntil){
+        if(!firstHit){
+          firstHit = {gate:i, t:now};
+          $('status').textContent = 'Ball at gate ' + (i===0?'A':'B') + '…';
+        }else if(firstHit.gate !== i){
+          const dt = (now - firstHit.t) / 1000;
+          firstHit = null;
+          if(dt > 0.10 && dt < 2.5){
+            report(dt);
+            lockUntil = now + 900;                 // fast re-arm for back-to-back deliveries
+          }
+        }else if(now - firstHit.t > 600){
+          firstHit = {gate:i, t:now};              // same gate again after a gap: treat as a fresh delivery
+        }
+      }
+    }
+
+    if(firstHit && now - firstHit.t > 2500){       // second gate never fired: self-clear
+      firstHit = null;
+      if(armed) $('status').textContent = 'Armed — waiting';
+    }
+
+    frames++;
+    if(now - fpsT > 1000){
+      $('fpsBadge').textContent = frames + ' fps';
+      frames = 0; fpsT = now;
+    }
+  }
+
+  function loop(){
+    if(!running) return;
+    if('requestVideoFrameCallback' in HTMLVideoElement.prototype){
+      cam.requestVideoFrameCallback((now, meta) => {
+        processFrame(meta && meta.mediaTime ? meta.mediaTime*1000 : now);
+        loop();
+      });
+    }else{
+      requestAnimationFrame(() => { processFrame(performance.now()); loop(); });
+    }
+  }
+
+  function report(dt){
+    const dist = parseFloat($('dist').value) || 17;
+    const kmh = dist / dt * 3.6;
+    if(kmh < 20 || kmh > 190){ $('status').textContent = 'Ignored an implausible reading'; return; }
+    const mph = kmh * 0.621371;
+    let tag = kmh >= 140 ? 'Express pace' : kmh >= 125 ? 'Genuinely fast' :
+              kmh >= 110 ? 'Fast-medium' : kmh >= 90 ? 'Medium' : 'Slow / spin';
+    $('speedVal').textContent = kmh.toFixed(1);
+    $('speedSub').textContent = 'km/h · ' + mph.toFixed(1) + ' mph · ' + tag;
+    $('readout').classList.remove('flash'); void $('readout').offsetWidth;
+    $('readout').classList.add('flash');
+    if(navigator.vibrate) navigator.vibrate(120);
+
+    speeds.push(kmh);
+    $('stBalls').textContent = speeds.length;
+    $('stFast').textContent = Math.max(...speeds).toFixed(0);
+    $('stAvg').textContent = (speeds.reduce((a,b)=>a+b,0)/speeds.length).toFixed(0);
+
+    $('status').textContent = 'Recorded — re-arming';
+    setTimeout(() => { if(armed) $('status').textContent = 'Armed — waiting'; }, 900);
+
+    const t = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+    $('histEmpty').style.display = 'none';
+    const div = document.createElement('div');
+    div.className = 'item';
+    div.innerHTML = '<span>' + t + '</span><b>' + kmh.toFixed(1) + ' km/h</b>';
+    $('histList').prepend(div);
+    while($('histList').children.length > 15) $('histList').lastChild.remove();
+  }
+
+  $('sens').addEventListener('input', e => $('sensVal').textContent = e.target.value);
+  $('startBtn').addEventListener('click', () => { if(!stream) startCamera(); });
+  $('armBtn').addEventListener('click', () => {
+    armed = !armed;
+    firstHit = null;
+    if(armed){
+      $('armBtn').textContent = 'Disarm';
+      $('armBtn').classList.remove('primary'); $('armBtn').classList.add('stop');
+      $('status').textContent = 'Armed — waiting';
+      $('status').classList.add('live');
+      settleUntil = performance.now() + 800;   // brief settle so arming itself doesn't trigger
+    }else{
+      $('armBtn').textContent = 'Arm gun';
+      $('armBtn').classList.remove('stop'); $('armBtn').classList.add('primary');
+      $('status').textContent = 'Disarmed';
+      $('status').classList.remove('live');
+    }
+  });
+})();
+</script>
+</body>
+</html>
