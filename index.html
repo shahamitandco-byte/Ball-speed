@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="theme-color" content="#0d1210">
-<title>Turf Speed Gun v4</title>
+<title>Turf Speed Gun v5</title>
 <style>
   :root{
     --bg:#0d1210; --surface:#161d1a; --surface2:#1e2722;
@@ -62,12 +62,17 @@
   button:active{transform:scale(.98);}
   button.primary{background:var(--accent); color:#101500; border-color:var(--accent);}
   button.stop{background:transparent; color:var(--danger); border-color:var(--danger);}
+  button.on{border-color:var(--accent); color:var(--accent);}
   .btnrow{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .btnrow3{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .btnrow3 button{padding:11px 12px; font-size:14px;}
 
   .status{font-size:13px; color:var(--muted); text-align:center; min-height:20px;}
   .status.live{color:var(--accent);}
 
   .history{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:4px 16px;}
+  .history .head{display:flex; justify-content:space-between; padding:9px 0 4px;
+    font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:var(--muted);}
   .history .item{display:flex; justify-content:space-between; padding:9px 0;
     border-bottom:1px solid var(--line); font-size:14px;}
   .history .item:last-child{border-bottom:none;}
@@ -83,7 +88,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>Turf <span>speed gun</span> <small style="color:var(--muted)">v4</small></h1>
+    <h1>Turf <span>speed gun</span> <small style="color:var(--muted)">v5</small></h1>
     <small id="fpsBadge">—</small>
   </header>
 
@@ -123,19 +128,24 @@
     <button id="startBtn" class="primary">Start camera</button>
     <button id="armBtn" disabled>Arm gun</button>
   </div>
+  <div class="btnrow3">
+    <button id="voiceBtn">Voice: Off</button>
+    <button id="clearBtn">Clear history</button>
+  </div>
   <div class="status" id="status">Lime line = speed pole. Blue ruler = stretch over the stumps.</div>
 
   <div class="history">
+    <div class="head"><span>Session</span><span>Auto-clears after 5 min</span></div>
     <div class="empty" id="histEmpty">No deliveries recorded yet</div>
     <div id="histList"></div>
   </div>
 
   <details>
-    <summary>How single-pole mode works</summary>
-    <p><b>The lime pole.</b> Drag it anywhere along the pitch — mid-pitch is ideal. The app tracks the ball's flight and reports its speed the moment the ball crosses this line.</p>
-    <p><b>The blue ruler calibrates everything.</b> Drag its two round handles so the ruler exactly covers the stumps (standard stumps are 0.71 m — already filled in). If you'd rather use something else — a marked pole, a chair — stretch the ruler over it and type its real height. This one ruler teaches the app how big a meter looks on screen.</p>
-    <p><b>No speed limit.</b> Slow rollers, spin, even a gentle lob — all measured. People are filtered by shape, not speed: a ball is a small compact blob of motion, a person is a tall column. If a walker occasionally sneaks a reading in, just disarm between overs.</p>
-    <p><b>Lime dots</b> trail whatever is being tracked. Roll a ball across the frame — if dots follow it, you're calibrated. If not, raise sensitivity.</p>
+    <summary>How this version works</summary>
+    <p><b>The lime pole.</b> Drag it mid-pitch. Speed is reported the moment the tracked ball crosses it. No speed limit — rollers and lobs count too.</p>
+    <p><b>The blue ruler.</b> Stretch its handles over the stumps (0.71 m is pre-filled). This calibrates real-world scale. Calibrate on something standing at the pitch, not nearer the camera.</p>
+    <p><b>Voice.</b> Tap "Voice: On" once — it announces each speed aloud so nobody checks the screen between balls.</p>
+    <p><b>Session memory.</b> Deliveries survive closing and reopening the page — but everything self-deletes 5 minutes after it was bowled. Stats follow the same rolling 5-minute window. "Clear history" wipes instantly.</p>
   </details>
 </div>
 
@@ -148,19 +158,89 @@
   const proc = document.createElement('canvas');
   const pctx = proc.getContext('2d', {willReadFrequently:true});
 
+  const STORE_KEY = 'tsg_session_v5';
+  const EXPIRY_MS = 5 * 60 * 1000;
+
   let stream = null, running = false, armed = false;
-  let pole = 0.5;                                   // single measurement line (fraction of width)
-  let cal = {x:0.12, y0:0.45, y1:0.72};             // blue calibration ruler (fractions)
+  let pole = 0.5;
+  let cal = {x:0.12, y0:0.45, y1:0.72};
   let bandTop = 0.25, bandBot = 0.78;
   let prevGray = null;
   let colBase = 2, colNoise = 1;
   let lockUntil = 0, settleUntil = 0;
   let frames = 0, fpsT = performance.now();
-  let dragging = null;                              // 'pole' | 'calTop' | 'calBot' | null
-  let speeds = [];
-  let track = [];                                   // [{x, t}]
-  let trail = [];
+  let dragging = null;
+  let track = [], trail = [];
+  let voiceOn = false;
 
+  // ---------- session store with 5-minute expiry ----------
+  function loadSession(){
+    try{
+      const raw = localStorage.getItem(STORE_KEY);
+      if(!raw) return [];
+      return JSON.parse(raw).filter(e => Date.now() - e.t < EXPIRY_MS);
+    }catch(e){ return []; }
+  }
+  function saveSession(list){
+    try{ localStorage.setItem(STORE_KEY, JSON.stringify(list)); }catch(e){}
+  }
+  function purgeAndRender(){
+    let list = loadSession();
+    saveSession(list);
+    renderSession(list);
+    return list;
+  }
+  function renderSession(list){
+    const hl = $('histList');
+    hl.innerHTML = '';
+    $('histEmpty').style.display = list.length ? 'none' : 'block';
+    for(let i=list.length-1; i>=0 && hl.children.length<15; i--){
+      const e = list[i];
+      const t = new Date(e.t).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+      const div = document.createElement('div');
+      div.className = 'item';
+      div.innerHTML = '<span>' + t + '</span><b>' + (e.kmh>=10?e.kmh.toFixed(1):e.kmh.toFixed(2)) + ' km/h</b>';
+      hl.appendChild(div);
+    }
+    if(list.length){
+      const sp = list.map(e=>e.kmh);
+      $('stBalls').textContent = sp.length;
+      $('stFast').textContent = Math.max(...sp).toFixed(0);
+      $('stAvg').textContent = (sp.reduce((a,b)=>a+b,0)/sp.length).toFixed(0);
+    }else{
+      $('stBalls').textContent = '0';
+      $('stFast').textContent = '—';
+      $('stAvg').textContent = '—';
+    }
+  }
+  setInterval(purgeAndRender, 15000);   // rolling 5-minute window
+  purgeAndRender();                     // restore anything <5 min old on page load
+
+  // ---------- voice ----------
+  function speak(text){
+    if(!voiceOn || !('speechSynthesis' in window)) return;
+    try{
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.05; u.lang = 'en-IN';
+      speechSynthesis.speak(u);
+    }catch(e){}
+  }
+  $('voiceBtn').addEventListener('click', () => {
+    voiceOn = !voiceOn;
+    $('voiceBtn').textContent = 'Voice: ' + (voiceOn ? 'On' : 'Off');
+    $('voiceBtn').classList.toggle('on', voiceOn);
+    if(voiceOn) speak('Voice on');      // also unlocks speech on mobile
+    else if('speechSynthesis' in window) speechSynthesis.cancel();
+  });
+
+  $('clearBtn').addEventListener('click', () => {
+    saveSession([]);
+    renderSession([]);
+    $('status').textContent = 'History cleared';
+  });
+
+  // ---------- overlay drawing / dragging ----------
   function resizeOverlay(){
     overlay.width = overlay.clientWidth * devicePixelRatio;
     overlay.height = overlay.clientHeight * devicePixelRatio;
@@ -173,7 +253,6 @@
     octx.clearRect(0,0,w,h);
     if(!stream) return;
 
-    // detection band
     octx.setLineDash([8,8]);
     octx.strokeStyle = 'rgba(200,245,60,0.35)';
     octx.lineWidth = 2;
@@ -183,7 +262,6 @@
     octx.stroke();
     octx.setLineDash([]);
 
-    // the pole
     const px = pole*w;
     octx.strokeStyle = '#c8f53c';
     octx.lineWidth = 3;
@@ -192,7 +270,6 @@
     octx.font = `${12*dpr}px -apple-system,sans-serif`;
     octx.fillText('POLE', px+6, 18*dpr);
 
-    // blue calibration ruler with handles
     const cx = cal.x*w, cy0 = cal.y0*h, cy1 = cal.y1*h;
     octx.strokeStyle = '#5cc8ff';
     octx.lineWidth = 3;
@@ -206,7 +283,6 @@
     octx.fillStyle = '#5cc8ff';
     octx.fillText((+$('refH').value).toFixed(2)+' m', cx+12*dpr, (cy0+cy1)/2);
 
-    // ball trail
     const now = performance.now();
     for(const p of trail){
       const age = (now - p.t) / 800;
@@ -229,8 +305,6 @@
   function down(e){
     if(!stream) return;
     const p = pointerPos(e);
-    // nearest draggable: pole line, cal top handle, cal bottom handle
-    const dPole = Math.abs(p.x - pole);
     const dTop = Math.hypot(p.x - cal.x, p.y - cal.y0);
     const dBot = Math.hypot(p.x - cal.x, p.y - cal.y1);
     if(dTop < 0.08 && dTop <= dBot) dragging = 'calTop';
@@ -242,11 +316,10 @@
     if(!dragging) return;
     e.preventDefault();
     const p = pointerPos(e);
-    const clampX = v => Math.min(0.97, Math.max(0.03, v));
-    const clampY = v => Math.min(0.97, Math.max(0.03, v));
-    if(dragging === 'pole'){ pole = clampX(p.x); }
-    else if(dragging === 'calTop'){ cal.x = clampX(p.x); cal.y0 = Math.min(clampY(p.y), cal.y1-0.05); }
-    else if(dragging === 'calBot'){ cal.x = clampX(p.x); cal.y1 = Math.max(clampY(p.y), cal.y0+0.05); }
+    const cX = v => Math.min(0.97, Math.max(0.03, v));
+    if(dragging === 'pole'){ pole = cX(p.x); }
+    else if(dragging === 'calTop'){ cal.x = cX(p.x); cal.y0 = Math.min(cX(p.y), cal.y1-0.05); }
+    else if(dragging === 'calBot'){ cal.x = cX(p.x); cal.y1 = Math.max(cX(p.y), cal.y0+0.05); }
     drawOverlay();
   }
   function up(){ dragging = null; }
@@ -258,6 +331,7 @@
   addEventListener('touchend', up);
   $('refH').addEventListener('input', drawOverlay);
 
+  // ---------- camera ----------
   async function startCamera(){
     try{
       stream = await navigator.mediaDevices.getUserMedia({
@@ -282,8 +356,7 @@
     }
   }
 
-  // Detect strongest compact motion cluster. Returns {x, y} fractions or null.
-  // Person rejection: clusters whose motion fills most of the band vertically are discarded.
+  // ---------- detection (compact motion blob, person-shape rejection) ----------
   function detectBall(now){
     pctx.drawImage(cam, 0, 0, PW, PH);
     const img = pctx.getImageData(0, 0, PW, PH).data;
@@ -298,7 +371,7 @@
 
     const colE = new Float32Array(PW);
     const colY = new Float32Array(PW);
-    const colFill = new Float32Array(PW);           // fraction of band rows with strong motion
+    const colFill = new Float32Array(PW);
     for(let x=0; x<PW; x++){
       let sum = 0, best = 0, bestY = 0, strong = 0;
       for(let y=bandY0; y<bandY1; y++){
@@ -341,14 +414,13 @@
     if(!best){ colBase = colBase*0.93 + frameMean*0.07; colNoise = colNoise*0.93 + Math.abs(frameMean-colBase)*0.07; }
 
     const peak = best ? best.peak : frameMean;
-    const pct = Math.min(100, peak/(thresh*2)*100);
-    $('meter').style.width = pct + '%';
+    $('meter').style.width = Math.min(100, peak/(thresh*2)*100) + '%';
     $('meter').classList.toggle('hot', !!best);
 
     if(!best) return null;
     const width = (best.x1 - best.x0 + 1) / PW;
-    if(width > 0.30) return null;                   // too wide — likely a person near the camera
-    if(best.fill > 0.55) return null;               // fills the band top-to-bottom — a person, not a ball
+    if(width > 0.30) return null;
+    if(best.fill > 0.55) return null;
     return { x: (best.ex/best.e)/PW, y: best.ey/best.e };
   }
 
@@ -369,13 +441,12 @@
     return { slope, r2, span: Math.abs(pts[n-1].x - pts[0].x), dt:(pts[n-1].t - pts[0].t)/1000 };
   }
 
-  // pixels-per-meter from the blue ruler (in fraction-of-height terms)
   function metersPerWidthFraction(){
     const refM = parseFloat($('refH').value) || 0.71;
-    const rulerFracH = Math.abs(cal.y1 - cal.y0);           // fraction of frame height
+    const rulerFracH = Math.abs(cal.y1 - cal.y0);
     const vw = cam.videoWidth || 1280, vh = cam.videoHeight || 720;
-    const pxPerM = (rulerFracH * vh) / refM;                 // pixels per meter
-    return vw / pxPerM;                                      // meters spanned by full frame width
+    const pxPerM = (rulerFracH * vh) / refM;
+    return vw / pxPerM;
   }
 
   function processFrame(now){
@@ -392,7 +463,6 @@
 
         const fit = fitTrack(track);
         if(fit && fit.r2 > 0.92 && fit.span > 0.22 && fit.dt > 0.08){
-          // require the track to have crossed the pole
           let minX = 1, maxX = 0;
           for(const p of track){ if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x; }
           if(minX < pole && maxX > pole){
@@ -435,27 +505,22 @@
     let tag = kmh >= 140 ? 'Express pace' : kmh >= 125 ? 'Genuinely fast' :
               kmh >= 110 ? 'Fast-medium' : kmh >= 90 ? 'Medium' :
               kmh >= 50 ? 'Slow-medium' : kmh >= 15 ? 'Spin / lob' : 'Rolling';
-    $('speedVal').textContent = kmh >= 10 ? kmh.toFixed(1) : kmh.toFixed(2);
+    const disp = kmh >= 10 ? kmh.toFixed(1) : kmh.toFixed(2);
+    $('speedVal').textContent = disp;
     $('speedSub').textContent = 'km/h · ' + mph.toFixed(1) + ' mph · ' + tag + ' · ' + points + ' pts';
     $('readout').classList.remove('flash'); void $('readout').offsetWidth;
     $('readout').classList.add('flash');
     if(navigator.vibrate) navigator.vibrate(120);
 
-    speeds.push(kmh);
-    $('stBalls').textContent = speeds.length;
-    $('stFast').textContent = Math.max(...speeds).toFixed(0);
-    $('stAvg').textContent = (speeds.reduce((a,b)=>a+b,0)/speeds.length).toFixed(0);
+    speak(disp);
+
+    const list = loadSession();
+    list.push({t: Date.now(), kmh});
+    saveSession(list);
+    renderSession(list);
 
     $('status').textContent = 'Recorded — re-arming';
     setTimeout(() => { if(armed) $('status').textContent = 'Armed — tracking'; }, 900);
-
-    const t = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
-    $('histEmpty').style.display = 'none';
-    const div = document.createElement('div');
-    div.className = 'item';
-    div.innerHTML = '<span>' + t + '</span><b>' + (kmh>=10?kmh.toFixed(1):kmh.toFixed(2)) + ' km/h</b>';
-    $('histList').prepend(div);
-    while($('histList').children.length > 15) $('histList').lastChild.remove();
   }
 
   $('sens').addEventListener('input', e => $('sensVal').textContent = e.target.value);
