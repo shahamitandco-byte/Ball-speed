@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="theme-color" content="#0d1210">
-<title>Turf Speed Gun v6</title>
+<title>Turf Speed Gun v7</title>
 <style>
   :root{
     --bg:#0d1210; --surface:#161d1a; --surface2:#1e2722;
@@ -88,13 +88,13 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>Turf <span>speed gun</span> <small style="color:var(--muted)">v6</small></h1>
+    <h1>Turf <span>speed gun</span> <small style="color:var(--muted)">v7</small></h1>
     <small id="fpsBadge">—</small>
   </header>
 
   <div class="readout" id="readout">
     <div class="speed" id="speedVal">—</div>
-    <div class="sub" id="speedSub">Detection engine rebuilt — try a rolled ball first</div>
+    <div class="sub" id="speedSub">Multi-object engine — people no longer block the ball</div>
     <div class="stats">
       <div><div class="n" id="stBalls">0</div><div class="l">Balls</div></div>
       <div><div class="n" id="stFast">—</div><div class="l">Fastest</div></div>
@@ -141,11 +141,11 @@
   </div>
 
   <details>
-    <summary>What changed in v6 + tuning</summary>
-    <p><b>Small-ball detection fixed.</b> The engine now reacts to the hottest small zone in each column instead of averaging the whole height — a tiny ball's signal is no longer drowned out. Processing resolution is also higher.</p>
-    <p><b>Watch the dots.</b> Roll a ball across the frame: lime dots must trail it. No dots = raise sensitivity. Dots on empty air = lower it. Do this 30-second check before every session.</p>
-    <p><b>Live tracking counter.</b> While a ball is in flight the status line shows "tracking: N pts". If you see the counter rise but no speed appears, tell me the number it reached — that pinpoints the remaining bottleneck.</p>
-    <p><b>Missed the pole? Still counted.</b> If a solid track ends without crossing the pole, the speed is reported anyway when the ball leaves the frame.</p>
+    <summary>What v7 changed + field tuning</summary>
+    <p><b>People are skipped, not blocking.</b> Earlier versions grabbed the biggest moving thing (usually the bowler) and gave up. v7 finds every moving object, throws away the person-shaped ones, and tracks the compact ball-shaped ones — even while the bowler, batsman, and keeper all move.</p>
+    <p><b>Physics lock-on.</b> Once a ball track starts, each new sighting must be where the ball is predicted to be. Random motion elsewhere can't hijack a track mid-flight.</p>
+    <p><b>Dot test still rules.</b> Roll a ball while people walk around — dots should follow the ball, not the people. Tune sensitivity until they do.</p>
+    <p><b>Status line is the debugger.</b> "tracking: N pts" should climb during a delivery. If it climbs but no speed comes, note the highest N and report it.</p>
   </details>
 </div>
 
@@ -154,13 +154,13 @@
   const $ = id => document.getElementById(id);
   const cam = $('cam'), overlay = $('overlay'), octx = overlay.getContext('2d');
 
-  // Higher-res analysis + hottest-zone column signal (the v6 core fix)
-  const PW = 320; let PH = 180, bandY0 = 0, bandY1 = 0;
-  const ZR = 6;                                   // zone height in rows
+  // v7: process ONLY the band strip, at double horizontal resolution.
+  const PW = 480; let BH = 100;               // band strip height in processed rows
+  const ZR = 5;
   const proc = document.createElement('canvas');
   const pctx = proc.getContext('2d', {willReadFrequently:true});
 
-  const STORE_KEY = 'tsg_session_v6';
+  const STORE_KEY = 'tsg_session_v7';
   const EXPIRY_MS = 5 * 60 * 1000;
 
   let stream = null, running = false, armed = false;
@@ -175,7 +175,7 @@
   let track = [], trail = [];
   let voiceOn = false;
 
-  // ---------- session store (5-minute rolling window) ----------
+  // ---------- session store ----------
   function loadSession(){
     try{
       const raw = localStorage.getItem(STORE_KEY);
@@ -330,8 +330,9 @@
       });
       cam.srcObject = stream;
       await cam.play();
-      PH = Math.round(PW * cam.videoHeight / cam.videoWidth) || 180;
-      proc.width = PW; proc.height = PH;
+      BH = 100;
+      proc.width = PW; proc.height = BH;
+      prevGray = null;
       $('camHint').style.display = 'none';
       $('startBtn').textContent = 'Camera on';
       $('startBtn').classList.remove('primary');
@@ -346,40 +347,41 @@
     }
   }
 
-  // ---------- v6 detection: hottest-zone column signal ----------
-  function detectBall(now){
-    pctx.drawImage(cam, 0, 0, PW, PH);
-    const img = pctx.getImageData(0, 0, PW, PH).data;
-    bandY0 = Math.round(bandTop*PH); bandY1 = Math.round(bandBot*PH);
-    const bandRows = bandY1 - bandY0;
+  // ---------- v7 detection: ALL clusters, people skipped, ball candidates returned ----------
+  function detectCandidates(now){
+    const vw = cam.videoWidth, vh = cam.videoHeight;
+    if(!vw) return [];
+    // draw only the band strip, at high horizontal resolution
+    pctx.drawImage(cam, 0, bandTop*vh, vw, (bandBot-bandTop)*vh, 0, 0, PW, BH);
+    const img = pctx.getImageData(0, 0, PW, BH).data;
 
     if(!prevGray){
-      prevGray = new Float32Array(PW*PH);
-      for(let i=0,j=0;j<PW*PH;i+=4,j++) prevGray[j] = (img[i]*3+img[i+1]*6+img[i+2])/10;
-      return null;
+      prevGray = new Float32Array(PW*BH);
+      for(let i=0,j=0;j<PW*BH;i+=4,j++) prevGray[j] = (img[i]*3+img[i+1]*6+img[i+2])/10;
+      return [];
     }
 
-    const colE = new Float32Array(PW);      // hottest zone diff (small-ball friendly)
-    const colY = new Float32Array(PW);      // row of hottest zone
-    const colFill = new Float32Array(PW);   // fraction of rows with strong motion (person filter)
+    const colE = new Float32Array(PW);
+    const colY = new Float32Array(PW);
+    const colFill = new Float32Array(PW);
     for(let x=0; x<PW; x++){
-      let zoneSum = 0, zoneN = 0, bestZone = 0, bestZoneY = bandY0, strong = 0;
-      for(let y=bandY0; y<bandY1; y++){
+      let zoneSum = 0, zoneN = 0, bestZone = 0, bestZoneY = 0, strong = 0;
+      for(let y=0; y<BH; y++){
         const j = y*PW + x, p = j*4;
         const g = (img[p]*3+img[p+1]*6+img[p+2])/10;
         const d = Math.abs(g - prevGray[j]);
         prevGray[j] = g;
         zoneSum += d; zoneN++;
         if(d > 14) strong++;
-        if(zoneN === ZR || y === bandY1-1){
+        if(zoneN === ZR || y === BH-1){
           const zAvg = zoneSum/zoneN;
           if(zAvg > bestZone){ bestZone = zAvg; bestZoneY = y - (zoneN>>1); }
           zoneSum = 0; zoneN = 0;
         }
       }
       colE[x] = bestZone;
-      colY[x] = bestZoneY / PH;
-      colFill[x] = strong / bandRows;
+      colY[x] = bestZoneY / BH;
+      colFill[x] = strong / BH;
     }
 
     const sm = new Float32Array(PW);
@@ -392,35 +394,66 @@
     frameMean /= PW;
     const thresh = colBase + Math.max(3.0, colNoise*k);
 
-    let best = null, cur = null;
+    // gather ALL clusters
+    const clusters = [];
+    let cur = null;
     for(let x=0; x<PW; x++){
       if(sm[x] > thresh && now > settleUntil){
         if(!cur) cur = {x0:x, x1:x, e:0, ex:0, ey:0, fill:0, peak:0};
         cur.x1 = x; cur.e += sm[x]; cur.ex += sm[x]*x; cur.ey += sm[x]*colY[x];
         if(sm[x] > cur.peak){ cur.peak = sm[x]; cur.fill = colFill[x]; }
-      }else if(cur){
-        if(!best || cur.e > best.e) best = cur;
-        cur = null;
-      }
+      }else if(cur){ clusters.push(cur); cur = null; }
     }
-    if(cur && (!best || cur.e > best.e)) best = cur;
+    if(cur) clusters.push(cur);
 
-    if(!best){ colBase = colBase*0.93 + frameMean*0.07; colNoise = colNoise*0.93 + Math.abs(frameMean-colBase)*0.07; }
+    if(!clusters.length){
+      colBase = colBase*0.93 + frameMean*0.07;
+      colNoise = colNoise*0.93 + Math.abs(frameMean-colBase)*0.07;
+    }
 
-    const peak = best ? best.peak : frameMean;
+    let anyBall = false;
+    const candidates = [];
+    for(const c of clusters){
+      const width = (c.x1 - c.x0 + 1) / PW;
+      const isPerson = width > 0.22 || c.fill > 0.55;
+      if(isPerson) continue;                       // skip people — do NOT block the frame
+      anyBall = true;
+      candidates.push({
+        x: (c.ex/c.e)/PW,
+        // convert band-local y back to full-frame fraction for the trail dots
+        y: bandTop + (c.ey/c.e)*(bandBot-bandTop),
+        e: c.e, peak: c.peak
+      });
+    }
+    candidates.sort((a,b)=>b.e-a.e);
+    if(candidates.length > 4) candidates.length = 4;
+
+    const peak = candidates.length ? candidates[0].peak : frameMean;
     $('meter').style.width = Math.min(100, peak/(thresh*2)*100) + '%';
-    $('meter').classList.toggle('hot', !!best);
+    $('meter').classList.toggle('hot', anyBall);
 
-    if(!best) return null;
-    const width = (best.x1 - best.x0 + 1) / PW;
-    if(width > 0.30) return null;           // too wide: person near camera
-    if(best.fill > 0.60) return null;       // fills band vertically: person
-    return { x: (best.ex/best.e)/PW, y: best.ey/best.e };
+    return candidates;
+  }
+
+  // pick the candidate consistent with the current track's physics
+  function associate(cands, now){
+    if(!cands.length) return null;
+    if(track.length < 2) return cands[0];          // no motion model yet: strongest wins
+    const a = track[track.length-2], b = track[track.length-1];
+    const v = (b.x - a.x) / Math.max(1e-3, (b.t - a.t)/1000);   // fraction per second
+    const dt = (now - b.t)/1000;
+    const predX = b.x + v*dt;
+    let best = null, bestD = 1;
+    for(const c of cands){
+      const d = Math.abs(c.x - predX);
+      if(d < bestD){ bestD = d; best = c; }
+    }
+    return bestD < 0.12 ? best : cands[0];
   }
 
   function fitTrack(pts){
     const n = pts.length;
-    if(n < 4) return null;                  // relaxed from 5
+    if(n < 4) return null;
     const t0 = pts[0].t;
     let sx=0, sy=0, sxx=0, sxy=0;
     for(const p of pts){ const tt=(p.t-t0)/1000; sx+=tt; sy+=p.x; sxx+=tt*tt; sxy+=tt*p.x; }
@@ -445,7 +478,7 @@
   function tryReport(now, requirePole){
     const fit = fitTrack(track);
     if(!fit) return false;
-    if(fit.r2 < 0.85 || fit.span < 0.15 || fit.dt < 0.06) return false;   // relaxed acceptance
+    if(fit.r2 < 0.85 || fit.span < 0.15 || fit.dt < 0.06) return false;
     if(requirePole){
       let minX = 1, maxX = 0;
       for(const p of track){ if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x; }
@@ -460,7 +493,8 @@
   }
 
   function processFrame(now){
-    const det = detectBall(now);
+    const cands = detectCandidates(now);
+    const det = armed ? associate(cands, now) : (cands[0] || null);
 
     if(det){
       trail.push({x:det.x, y:det.y, t:performance.now()});
@@ -468,16 +502,15 @@
 
       if(armed && now > lockUntil){
         if(track.length && now - track[track.length-1].t > 400){
-          tryReport(now, false);            // old track ending: report if it was solid
+          tryReport(now, false);
           track = [];
         }
         track.push({x:det.x, t:now});
         if(track.length > 180) track.shift();
         if(track.length >= 3) $('status').textContent = 'tracking: ' + track.length + ' pts';
-        tryReport(now, true);               // instant report the moment the pole is crossed
+        tryReport(now, true);
       }
     }else if(track.length && now - track[track.length-1].t > 450){
-      // ball left the frame or was lost: report a solid track even if it never crossed the pole
       if(armed && now > lockUntil && !tryReport(now, false)){
         if(armed) $('status').textContent = 'Armed — tracking';
       }
